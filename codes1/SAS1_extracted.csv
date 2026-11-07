@@ -1,0 +1,6 @@
+Category,Name,Details
+LIBNAME,mydata,"Library path: c:\folder"
+Library reference,mydata,"Used to qualify the employees dataset"
+DATA step,mydata.employees,"Creates the dataset; INPUT variables: ID (numeric), Name (character), Salary (numeric); source: inline DATALINES"
+PROC step,PROC PRINT,"DATA=mydata.employees"
+SET statement,None,"No SET statements found"

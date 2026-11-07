@@ -1,0 +1,103 @@
+#!/usr/bin/env python3
+"""Extract LIBNAMEs and DATA/PROC/SET references from a SAS program to CSV."""
+
+import argparse
+import csv
+import re
+from pathlib import Path
+
+
+def remove_comments(source):
+    source = re.sub(r"/\*.*?\*/", " ", source, flags=re.DOTALL)
+    return re.sub(r"(?m)^\s*\*[^;]*;", " ", source)
+
+
+def mask_datalines(source):
+    pattern = re.compile(
+        r"(?im)\b(?:datalines|cards)\s*;.*?^\s*;\s*(?:\r?\n|$)"
+    )
+    return pattern.sub(
+        lambda match: re.sub(r"[^\r\n]", " ", match.group()), source
+    )
+
+
+def extract(source_path, output_path):
+    source = remove_comments(source_path.read_text(encoding="utf-8-sig"))
+    code = mask_datalines(source)
+    rows = []
+    library_names = {}
+
+    for match in re.finditer(r"\blibname\s+([a-z_]\w*)\s+([^;]+);", code, re.I):
+        libref = match.group(1)
+        path = match.group(2).strip()
+        library_names[libref.lower()] = libref
+        rows.append(("LIBNAME", libref, f"Library path: {path}"))
+
+    data_matches = list(re.finditer(r"\bdata\s+([^;]+);", code, re.I))
+    for index, match in enumerate(data_matches):
+        target = match.group(1).strip().split()[0]
+        end = data_matches[index + 1].start() if index + 1 < len(data_matches) else len(code)
+        next_step = re.search(r"\b(?:proc|run|quit)\b", code[match.end():end], re.I)
+        if next_step:
+            end = match.end() + next_step.start()
+        block = source[match.end():end]
+        details = f"Creates the dataset; code: {match.group(0).strip()}"
+        input_match = re.search(r"\binput\s+([^;]+);", block, re.I)
+        if input_match:
+            variables = " ".join(input_match.group(1).split())
+            details += f"; INPUT variables: {variables}"
+        if re.search(r"\b(?:datalines|cards)\s*;", block, re.I):
+            details += "; source: inline DATALINES"
+        rows.append(("DATA step", target, details))
+
+    proc_matches = list(re.finditer(r"\bproc\s+([a-z_]\w*)([^;]*);", code, re.I))
+    for match in proc_matches:
+        statement = " ".join(match.group(0).split())
+        rows.append(("PROC step", f"PROC {match.group(1).upper()}", statement))
+
+    set_matches = list(re.finditer(r"\bset\s+([^;]+);", code, re.I))
+    for match in set_matches:
+        statement = " ".join(match.group(0).split())
+        rows.append(("SET statement", " ".join(match.group(1).split()), statement))
+    if not set_matches:
+        rows.append(("SET statement", "None", "No SET statements found"))
+
+    references = set(library_names)
+    for match in re.finditer(
+        r"\b(?:data\s+[^;]+|proc\s+[a-z_]\w*[^;]*|set\s+[^;]+);", code, re.I
+    ):
+        references.update(
+            ref.lower()
+            for ref in re.findall(r"\b([a-z_]\w*)\s*\.", match.group())
+        )
+    for ref in sorted(references):
+        rows.append(
+            ("Library reference", library_names.get(ref, ref), "Used in the SAS program")
+        )
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("w", newline="", encoding="utf-8") as csv_file:
+        writer = csv.writer(csv_file)
+        writer.writerow(("Category", "Name", "Details"))
+        writer.writerows(rows)
+    return len(rows)
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Extract LIBNAME, DATA, PROC, library-reference, and SET details to CSV."
+    )
+    parser.add_argument("source", type=Path, help="Path to the SAS source file")
+    parser.add_argument(
+        "-o", "--output", type=Path, help="CSV output path (default: <source>_extracted.csv)"
+    )
+    args = parser.parse_args()
+    output_path = args.output or args.source.with_name(
+        f"{args.source.stem}_extracted.csv"
+    )
+    count = extract(args.source, output_path)
+    print(f"Wrote {count} records to {output_path}")
+
+
+if __name__ == "__main__":
+    main()
